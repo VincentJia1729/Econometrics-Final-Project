@@ -1,0 +1,249 @@
+---
+title: "Untitled"
+author: "Uchendu Chinaza Samuel"
+date: "2024-12-12"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+# --------------------------
+# 1. Load Required Libraries
+# --------------------------
+library(quantmod)
+library(rugarch)
+library(PerformanceAnalytics)
+library(ggplot2)
+
+# -----------------------
+# 2. Data Preparation
+# -----------------------
+
+# Define stock symbols
+symbols <- c("^GSPTSE", "^GSPC")  # S&P/TSX and S&P 500
+
+# Fetch historical data
+start_date <- as.Date("2006-01-01")
+end_date <- as.Date("2024-10-31")
+getSymbols(symbols, src = "yahoo", from = start_date, to = end_date)
+
+# Extract adjusted closing prices
+tsx_prices <- Ad(GSPTSE)
+sp500_prices <- Ad(GSPC)
+
+# Calculate daily log-returns
+tsx_returns <- na.omit(ROC(tsx_prices, type = "continuous"))
+sp500_returns <- na.omit(ROC(sp500_prices, type = "continuous"))
+
+# Define the training and testing periods
+train_start_date <- as.Date("2006-01-01")
+train_end_date <- as.Date("2019-12-31")
+test_start_date <- as.Date("2020-01-01")
+test_end_date <- as.Date("2024-10-31")
+
+# Split data into training and testing sets
+tsx_train <- tsx_returns[index(tsx_returns) >= train_start_date & index(tsx_returns) <= train_end_date, ]
+tsx_test <- tsx_returns[index(tsx_returns) >= test_start_date & index(tsx_returns) <= test_end_date, ]
+
+sp500_train <- sp500_returns[index(sp500_returns) >= train_start_date & index(sp500_returns) <= train_end_date, ]
+sp500_test <- sp500_returns[index(sp500_returns) >= test_start_date & index(sp500_returns) <= test_end_date, ]
+
+# -----------------------------
+# 3. Model Specification and Fitting
+# -----------------------------
+
+# Define Model Types and Distributions
+distributions <- c("norm", "std", "sstd")  # Normal, Student-t, Skewed Student-t
+model_types <- c("sGARCH", "eGARCH", "gjrGARCH", "fGARCH")  # TGARCH as submodel of fGARCH
+
+# Function to Create Model Specifications
+create_spec <- function(model_type, distribution, submodel = NULL) {
+  if (!is.null(submodel)) {
+    ugarchspec(
+      variance.model = list(model = "fGARCH", submodel = submodel, garchOrder = c(1, 1)),
+      mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+      distribution.model = distribution
+    )
+  } else {
+    ugarchspec(
+      variance.model = list(model = model_type, garchOrder = c(1, 1)),
+      mean.model = list(armaOrder = c(0, 0), include.mean = TRUE),
+      distribution.model = distribution
+    )
+  }
+}
+
+# Function to Fit Models
+fit_models <- function(data, model_types, distributions) {
+  results <- list()
+  for (model_type in model_types) {
+    for (distribution in distributions) {
+      if (model_type == "fGARCH") {
+        spec <- create_spec(model_type, distribution, submodel = "TGARCH")
+      } else {
+        spec <- create_spec(model_type, distribution)
+      }
+      model_name <- paste(model_type, distribution, sep = "_")
+      results[[model_name]] <- tryCatch(
+        ugarchfit(spec = spec, data = data, solver = "solnp"),
+        error = function(e) NULL
+      )
+    }
+  }
+  return(results)
+}
+
+# Fit Models for Training Data
+tsx_models <- fit_models(tsx_train, model_types, distributions)
+sp500_models <- fit_models(sp500_train, model_types, distributions)
+
+show(tsx_models)
+
+
+```
+```{r}
+show(sp500_models)
+
+```
+
+```{r}
+# --------------------------
+# 4. Model Evaluation
+# --------------------------
+
+# Function to Extract AIC and BIC
+extract_metrics <- function(models) {
+  metrics <- data.frame(Model = names(models), AIC = NA, BIC = NA)
+  for (i in seq_along(models)) {
+    if (!is.null(models[[i]])) {
+      metrics$AIC[i] <- infocriteria(models[[i]])[1]
+      metrics$BIC[i] <- infocriteria(models[[i]])[2]
+    }
+  }
+  return(metrics)
+}
+
+# Extract and Select Best Models
+tsx_metrics <- extract_metrics(tsx_models)
+sp500_metrics <- extract_metrics(sp500_models)
+
+show(tsx_metrics)
+show(sp500_metrics)
+
+
+best_fit_tsx <- tsx_metrics[which.min(tsx_metrics$AIC), "Model"]
+best_fit_sp500 <- sp500_metrics[which.min(sp500_metrics$AIC), "Model"]
+
+best_fit_tsx
+best_fit_sp500
+```
+
+
+```{r}
+# --------------------------
+# 5. Diagnostics
+# --------------------------
+
+# Ljung-Box Test for Residuals
+ljung_box_test <- function(model, model_name, dataset_name) {
+  if (!is.null(model)) {
+    residuals <- residuals(model, standardize = TRUE)
+    lb_residuals <- Box.test(residuals, lag = 10, type = "Ljung-Box")
+    lb_squared <- Box.test(residuals^2, lag = 10, type = "Ljung-Box")
+    cat("\nLjung-Box Test for Residuals of", model_name, "in", dataset_name, ":\n")
+    print(lb_residuals)
+    cat("\nLjung-Box Test for Squared Residuals of", model_name, "in", dataset_name, ":\n")
+    print(lb_squared)
+  }
+}
+
+# Diagnostic Plots
+generate_diagnostics <- function(model, model_name, dataset_name) {
+  if (!is.null(model)) {
+    cat("\nGenerating diagnostic plots for", model_name, "on", dataset_name, "...\n")
+    plot(model, which = "all", main = paste("Diagnostics for", model_name, "-", dataset_name))
+  }
+}
+
+# Run Diagnostics for Best Models
+ljung_box_test(tsx_models[[best_fit_tsx]], best_fit_tsx, "S&P/TSX")
+ljung_box_test(sp500_models[[best_fit_sp500]], best_fit_sp500, "S&P 500")
+
+generate_diagnostics(tsx_models[[best_fit_tsx]], best_fit_tsx, "S&P/TSX")
+generate_diagnostics(sp500_models[[best_fit_sp500]], best_fit_sp500, "S&P 500")
+
+
+
+
+```
+
+
+```{r}
+# --------------------------
+# 6. Forecasting
+# --------------------------
+
+# Function to Generate Forecasts
+forecast_models <- function(models, n.ahead) {
+  forecasts <- list()
+  for (name in names(models)) {
+    if (!is.null(models[[name]])) {
+      forecasts[[name]] <- ugarchforecast(models[[name]], n.ahead = n.ahead)
+    }
+  }
+  return(forecasts)
+}
+
+# Generate Forecasts
+tsx_forecasts <- forecast_models(tsx_models, n.ahead = nrow(tsx_test))
+sp500_forecasts <- forecast_models(sp500_models, n.ahead = nrow(sp500_test))
+
+# Function to Calculate MSE and MAE
+calculate_mse_mae <- function(actual, forecasts) {
+  metrics <- data.frame(Model = names(forecasts), MSE = NA, MAE = NA)
+  for (i in seq_along(forecasts)) {
+    if (!is.null(forecasts[[i]])) {
+      forecasted_values <- as.numeric(forecasts[[i]]@forecast$seriesFor)
+      actual_values <- as.numeric(actual)
+      metrics$MSE[i] <- mean((actual_values - forecasted_values)^2, na.rm = TRUE)
+      metrics$MAE[i] <- mean(abs(actual_values - forecasted_values), na.rm = TRUE)
+    }
+  }
+  return(metrics)
+}
+
+# Calculate Metrics
+tsx_forecast_metrics <- calculate_mse_mae(tsx_test, tsx_forecasts)
+sp500_forecast_metrics <- calculate_mse_mae(sp500_test, sp500_forecasts)
+
+show(tsx_forecast_metrics)
+show(sp500_forecast_metrics)
+```
+
+
+```{r}
+# --------------------------
+# 7. Visualization
+# --------------------------
+
+# Function to Plot Forecast vs Actual
+plot_forecast <- function(model, model_name, dataset_name, actual_data) {
+  forecast <- ugarchforecast(model, n.ahead = nrow(actual_data))
+  forecasted_values <- as.numeric(forecast@forecast$seriesFor)
+  actual_values <- as.numeric(actual_data)
+  plot(index(actual_data), actual_values, type = "l", col = "black", 
+       main = paste(dataset_name, "-", model_name, "Forecast"), xlab = "Date", ylab = "Log Returns")
+  lines(index(actual_data), forecasted_values, col = "blue", lty = 2)
+  legend("topright", legend = c("Actual", "Forecast"), col = c("black", "blue"), lty = c(1, 2))
+}
+
+# Plot for Best Models
+plot_forecast(tsx_models[[best_fit_tsx]], best_fit_tsx, "S&P/TSX", tsx_test)
+plot_forecast(sp500_models[[best_fit_sp500]], best_fit_sp500, "S&P 500", sp500_test)
+
+```
